@@ -395,6 +395,46 @@ int pmfs_reassign_file_btree(struct super_block *sb,
 	return 0;
 }
 
+static int pmfs_append_file_log(struct super_block *sb, struct pmfs_inode *pi,
+	struct inode *inode, struct list_head *head, u64 *begin, u64 *end)
+{
+	struct pmfs_file_write_entry_dram *curr;
+	struct pmfs_file_write_entry *data;
+	u64 temp_tail, begin_tail = 0;
+	u64 curr_entry = 0;
+
+	temp_tail = pi->log_tail;
+
+	list_for_each_entry(curr, head, link) {
+		data = (struct pmfs_file_write_entry *)curr;
+		curr_entry = pmfs_append_file_write_entry(sb, pi, inode,
+							data, temp_tail);
+		if (curr_entry == 0) {
+			pmfs_err(sb, "ERROR: append inode entry failed\n");
+			return -EINVAL;
+		}
+
+		if (begin_tail == 0)
+			begin_tail = curr_entry;
+		temp_tail = curr_entry + sizeof(struct pmfs_file_write_entry);
+	}
+
+	*begin = begin_tail;
+	*end = temp_tail;
+	return 0;
+}
+
+static void pmfs_free_write_entries(struct super_block *sb,
+	struct list_head *head)
+{
+	struct pmfs_file_write_entry_dram *curr, *next;
+
+	list_for_each_entry_safe(curr, next, head, link) {
+		list_del(&curr->link);
+		kmem_cache_free(pmfs_wrentry_cachep, curr);
+	}
+}
+
 ssize_t pmfs_cow_file_write(struct file *filp,
 	const char __user *buf,	size_t len, loff_t *ppos, bool need_mutex)
 {
@@ -404,7 +444,8 @@ ssize_t pmfs_cow_file_write(struct file *filp,
 	struct pmfs_inode_info_header *sih = si->header;
 	struct super_block *sb = inode->i_sb;
 	struct pmfs_inode *pi;
-	struct pmfs_file_write_entry entry_data;
+	struct pmfs_file_write_entry_dram *wrentry;
+	struct list_head wrentry_list_head;
 	ssize_t     written = 0;
 	loff_t pos;
 	size_t count, offset, copied, ret;
@@ -414,12 +455,11 @@ ssize_t pmfs_cow_file_write(struct file *filp,
 	unsigned int data_bits;
 	int allocated;
 	void* kmem;
-	u64 curr_entry;
 	size_t bytes;
 	long status = 0;
 	timing_t cow_write_time, memcpy_time;
 	unsigned long step = 0;
-	u64 temp_tail, begin_tail = 0;
+	u64 tail = 0, begin_tail = 0;
 	u32 time;
 
 	PMFS_START_TIMING(cow_write_t, cow_write_time);
@@ -459,7 +499,7 @@ ssize_t pmfs_cow_file_write(struct file *filp,
 			__func__, inode->i_ino,	pos >> sb->s_blocksize_bits,
 			offset, count);
 
-	temp_tail = pi->log_tail;
+	INIT_LIST_HEAD(&wrentry_list_head);
 	while (num_blocks > 0) {
 		offset = pos & (pmfs_inode_blk_size(pi) - 1);
 		start_blk = pos >> sb->s_blocksize_bits;
@@ -495,29 +535,29 @@ ssize_t pmfs_cow_file_write(struct file *filp,
 		copied = memcpy_to_nvmm((char *)kmem, offset, buf, bytes);
 		PMFS_END_TIMING(memcpy_w_nvmm_t, memcpy_time);
 
-		entry_data.pgoff = cpu_to_le32(start_blk);
-		entry_data.num_pages = cpu_to_le32(allocated);
-		entry_data.invalid_pages = 0;
-		entry_data.block = cpu_to_le64(pmfs_get_block_off(sb, blocknr,
-							pi->i_blk_type));
-		entry_data.mtime = cpu_to_le32(time);
-		/* Set entry type after set block */
-		pmfs_set_entry_type((void *)&entry_data, FILE_WRITE);
-
-		if (pos + copied > inode->i_size)
-			entry_data.size = cpu_to_le64(pos + copied);
-		else
-			entry_data.size = cpu_to_le64(inode->i_size);
-
-		curr_entry = pmfs_append_file_write_entry(sb, pi, inode,
-							&entry_data, temp_tail);
-		if (curr_entry == 0) {
-			pmfs_err(sb, "ERROR: append inode entry failed\n");
-			ret = -EINVAL;
+		wrentry = kmem_cache_alloc(pmfs_wrentry_cachep, GFP_NOFS);
+		if (!wrentry) {
+			pmfs_err(sb, "ERROR: allocate wrentry failed\n");
+			ret = -ENOMEM;
 			goto out;
 		}
 
-		pmfs_dbgv("Write: %p, %lu\n", kmem, copied);
+		wrentry->pgoff = cpu_to_le32(start_blk);
+		wrentry->num_pages = cpu_to_le32(allocated);
+		wrentry->invalid_pages = 0;
+		wrentry->block = cpu_to_le64(pmfs_get_block_off(sb, blocknr,
+							pi->i_blk_type));
+		wrentry->mtime = cpu_to_le32(time);
+		/* Set entry type after set block */
+		pmfs_set_entry_type((void *)wrentry, FILE_WRITE);
+
+		if (pos + copied > inode->i_size)
+			wrentry->size = cpu_to_le64(pos + copied);
+		else
+			wrentry->size = cpu_to_le64(inode->i_size);
+
+		list_add_tail(&wrentry->link, &wrentry_list_head);
+
 		if (copied > 0) {
 			status = copied;
 			written += copied;
@@ -534,10 +574,6 @@ ssize_t pmfs_cow_file_write(struct file *filp,
 		}
 		if (status < 0)
 			break;
-
-		if (begin_tail == 0)
-			begin_tail = curr_entry;
-		temp_tail = curr_entry + sizeof(struct pmfs_file_write_entry);
 	}
 
 	*ppos = pos;
@@ -552,7 +588,14 @@ ssize_t pmfs_cow_file_write(struct file *filp,
 		sih->i_size = pos;
 	}
 
-	pmfs_update_tail(pi, temp_tail);
+	ret = pmfs_append_file_log(sb, pi, inode, &wrentry_list_head,
+					&begin_tail, &tail);
+	if (ret) {
+		pmfs_err(sb, "ERROR: append file log failed\n");
+		goto out;
+	}
+
+	pmfs_update_tail(pi, tail);
 
 	/* Free the overlap blocks after the write is committed */
 	ret = pmfs_reassign_file_btree(sb, pi, sih, begin_tail);
@@ -569,6 +612,7 @@ out:
 	if (need_mutex)
 		mutex_unlock(&inode->i_mutex);
 	sb_end_write(inode->i_sb);
+	pmfs_free_write_entries(sb, &wrentry_list_head);
 	PMFS_END_TIMING(cow_write_t, cow_write_time);
 	cow_write_bytes += written;
 	return ret;
