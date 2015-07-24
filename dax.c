@@ -465,9 +465,6 @@ ssize_t pmfs_cow_file_write(struct file *filp,
 	PMFS_START_TIMING(cow_write_t, cow_write_time);
 
 	sb_start_write(inode->i_sb);
-	if (need_mutex)
-		mutex_lock(&inode->i_mutex);
-
 	if (!access_ok(VERIFY_READ, buf, len)) {
 		ret = -EFAULT;
 		goto out;
@@ -577,6 +574,10 @@ ssize_t pmfs_cow_file_write(struct file *filp,
 	}
 
 	*ppos = pos;
+
+	if (need_mutex)
+		mutex_lock(&inode->i_mutex);
+
 	pmfs_memunlock_inode(sb, pi);
 	data_bits = blk_type_to_shift[pi->i_blk_type];
 	le64_add_cpu(&pi->i_blocks,
@@ -592,7 +593,7 @@ ssize_t pmfs_cow_file_write(struct file *filp,
 					&begin_tail, &tail);
 	if (ret) {
 		pmfs_err(sb, "ERROR: append file log failed\n");
-		goto out;
+		goto unlock;
 	}
 
 	pmfs_update_tail(pi, tail);
@@ -600,17 +601,19 @@ ssize_t pmfs_cow_file_write(struct file *filp,
 	/* Free the overlap blocks after the write is committed */
 	ret = pmfs_reassign_file_btree(sb, pi, sih, begin_tail);
 	if (ret)
-		goto out;
+		goto unlock;
 
 	inode->i_blocks = le64_to_cpu(pi->i_blocks);
 
 	ret = written;
 	write_breaks += step;
-//	pmfs_dbg("blocks: %lu, %llu\n", inode->i_blocks, pi->i_blocks);
 
-out:
+unlock:
 	if (need_mutex)
 		mutex_unlock(&inode->i_mutex);
+
+//	pmfs_dbg("blocks: %lu, %llu\n", inode->i_blocks, pi->i_blocks);
+out:
 	sb_end_write(inode->i_sb);
 	pmfs_free_write_entries(sb, &wrentry_list_head);
 	PMFS_END_TIMING(cow_write_t, cow_write_time);
