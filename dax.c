@@ -16,6 +16,31 @@
 #include "pmfs.h"
 #include "dax.h"
 
+static struct kmem_cache *pmfs_wrentry_cachep;
+
+static void init_wrentry(void *foo)
+{
+	struct pmfs_file_write_entry_dram *vi = foo;
+
+	INIT_LIST_HEAD(&vi->link);
+}
+
+int __init init_wrentry_cache(void)
+{
+	pmfs_wrentry_cachep = kmem_cache_create("pmfs_wrentry_cache",
+				sizeof(struct pmfs_file_write_entry_dram),
+				0, (SLAB_RECLAIM_ACCOUNT | SLAB_MEM_SPREAD),
+				init_wrentry);
+	if (pmfs_wrentry_cachep == NULL)
+		return -ENOMEM;
+	return 0;
+}
+
+void destroy_wrentry_cache(void)
+{
+	kmem_cache_destroy(pmfs_wrentry_cachep);
+}
+
 static ssize_t
 do_dax_mapping_read(struct address_space *mapping,
 		    struct file_ra_state *_ra,

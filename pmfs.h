@@ -283,6 +283,19 @@ struct pmfs_file_write_entry {
 	__le64	size;
 } __attribute((__packed__));
 
+/* Corresponding dram write entry - top 32 bytes comply with NVMM version */
+struct pmfs_file_write_entry_dram {
+	/* ret of find_nvmm_block, the lowest byte is entry type */
+	__le64	block;
+	__le32	pgoff;
+	__le32	num_pages;
+	__le32	invalid_pages;
+	/* For both ctime and mtime */
+	__le32	mtime;
+	__le64	size;
+	struct list_head link;
+} __attribute((__packed__));
+
 struct	pmfs_inode_page_tail {
 	__le64	padding1;
 	__le64	padding2;
@@ -1063,6 +1076,8 @@ int pmfs_inode_log_recovery(struct super_block *sb, int multithread);
  */
 
 /* dax.c */
+int __init init_wrentry_cache(void);
+void destroy_wrentry_cache(void);
 int pmfs_reassign_file_btree(struct super_block *sb,
 	struct pmfs_inode *pi, struct pmfs_inode_info_header *sih,
 	u64 begin_tail);

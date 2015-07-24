@@ -1233,13 +1233,19 @@ static int __init init_pmfs_fs(void)
 	if (rc)
 		goto out5;
 
-	rc = register_filesystem(&pmfs_fs_type);
+	rc = init_wrentry_cache();
 	if (rc)
 		goto out6;
+
+	rc = register_filesystem(&pmfs_fs_type);
+	if (rc)
+		goto out7;
 
 	PMFS_END_TIMING(init_t, init_time);
 	return 0;
 
+out7:
+	destroy_wrentry_cache();
 out6:
 	destroy_header_cache();
 out5:
@@ -1264,6 +1270,7 @@ static void __exit exit_pmfs_fs(void)
 	destroy_blocknode_cache();
 	destroy_transaction_cache();
 	destroy_header_cache();
+	destroy_wrentry_cache();
 }
 
 MODULE_AUTHOR("Intel Corporation <linux-pmfs@intel.com>");
