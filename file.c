@@ -183,6 +183,7 @@ static inline int pmfs_set_page_clean(struct mm_struct *mm,
 	return 0;
 }
 
+#if 0
 static inline int pmfs_check_page_dirty(struct super_block *sb,
 	struct mem_addr *pair)
 {
@@ -247,6 +248,7 @@ static unsigned long pmfs_get_dirty_range(struct super_block *sb,
 
 	return flush_bytes;
 }
+#endif
 
 static void pmfs_update_dirty_range(struct pmfs_inode_info *si,
 	loff_t start, loff_t end)
@@ -306,8 +308,8 @@ int pmfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 	struct super_block *sb = inode->i_sb;
 	struct pmfs_inode *pi;
 	unsigned long start_blk, end_blk;
+	unsigned long nr_flush_bytes;
 	u64 end_tail = 0, begin_tail = 0;
-	u64 begin_temp = 0, end_temp = 0;
 	int ret = 0;
 	int mmaped = 0;
 	loff_t sync_start, sync_end;
@@ -356,29 +358,16 @@ int pmfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 
 	sync_start = start;
 	sync_end = end;
-	end_temp = pi->log_tail;
+	end_tail = pi->log_tail;
 
-	do {
-		unsigned long nr_flush_bytes = 0;
-
-		nr_flush_bytes = pmfs_get_dirty_range(sb, pi, si, &start, end);
-
-		pmfs_dbgv("start %llu, flush bytes %lu\n",
-				start, nr_flush_bytes);
-		if (nr_flush_bytes) {
-			pmfs_copy_to_nvmm(sb, inode, pi, start,
-				nr_flush_bytes, &begin_temp, &end_temp);
-			if (begin_tail == 0)
-				begin_tail = begin_temp;
-		}
-
-		start += nr_flush_bytes;
-	} while (start < end);
+	nr_flush_bytes = end - start;
+	if (nr_flush_bytes)
+		pmfs_copy_to_nvmm(sb, inode, pi, start,
+				nr_flush_bytes, &begin_tail, &end_tail);
 
 	if (pmfs_has_page_cache(sb))
 		pmfs_update_dirty_range(si, sync_start, sync_end);
 
-	end_tail = end_temp;
 	if (begin_tail && end_tail && end_tail != pi->log_tail) {
 		pmfs_update_tail(pi, end_tail);
 
