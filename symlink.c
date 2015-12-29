@@ -78,6 +78,25 @@ static int nova_readlink(struct dentry *dentry, char __user *buffer, int buflen)
 	return readlink_copy(buffer, buflen, blockp);
 }
 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(4,0,9)
+
+static void *nova_follow_link(struct dentry *dentry, struct nameidata *nd)
+{
+	struct nova_file_write_entry *entry;
+	struct inode *inode = dentry->d_inode;
+	struct super_block *sb = inode->i_sb;
+	struct nova_inode *pi = nova_get_inode(sb, inode);
+	char *blockp;
+
+	entry = (struct nova_file_write_entry *)nova_get_block(sb,
+							pi->log_head);
+	blockp = (char *)nova_get_block(sb, BLOCK_OFF(entry->block));
+	nd_set_link(nd, blockp);
+	return NULL;
+}
+
+#else
+
 static const char *nova_follow_link(struct dentry *dentry, void **cookie)
 {
 	struct nova_file_write_entry *entry;
@@ -92,6 +111,8 @@ static const char *nova_follow_link(struct dentry *dentry, void **cookie)
 
 	return blockp;
 }
+
+#endif
 
 const struct inode_operations nova_symlink_inode_operations = {
 	.readlink	= nova_readlink,
