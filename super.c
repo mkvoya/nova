@@ -84,6 +84,7 @@ static void nova_set_blocksize(struct super_block *sb, unsigned long size)
 	sb->s_blocksize = (1 << bits);
 }
 
+#if 0
 static int nova_get_block_info(struct super_block *sb,
 	struct nova_sb_info *sbi)
 {
@@ -110,6 +111,34 @@ static int nova_get_block_info(struct super_block *sb,
 
 	return 0;
 }
+#endif
+
+void *nova_ioremap(struct super_block *sb, phys_addr_t phys_addr, ssize_t size)
+{
+	void __iomem *retval;
+
+	/*
+	 * NOTE: Userland may not map this resource, we will mark the region so
+	 * /dev/mem and the sysfs MMIO access will not be allowed. This
+	 * restriction depends on STRICT_DEVMEM option. If this option is
+	 * disabled or not available we mark the region only as busy.
+	 */
+	retval = (void __iomem *)
+			request_mem_region_exclusive(phys_addr, size, "nova");
+	if (!retval)
+		goto fail;
+
+	retval = ioremap_cache(phys_addr, size);
+
+fail:
+	return (void __force *)retval;
+}
+
+static inline int nova_iounmap(void *virt_addr, ssize_t size, int protected)
+{
+	iounmap((void __iomem __force *)virt_addr);
+	return 0;
+}
 
 static loff_t nova_max_size(int bits)
 {
@@ -125,15 +154,16 @@ static loff_t nova_max_size(int bits)
 }
 
 enum {
-	Opt_bpi, Opt_init, Opt_mode, Opt_uid,
+	Opt_addr, Opt_bpi, Opt_init, Opt_mode, Opt_uid,
 	Opt_gid, Opt_blocksize, Opt_wprotect,
 	Opt_err_cont, Opt_err_panic, Opt_err_ro,
 	Opt_dbgmask, Opt_err
 };
 
 static const match_table_t tokens = {
+	{ Opt_addr,	     "physaddr=%x"	  },
 	{ Opt_bpi,	     "bpi=%u"		  },
-	{ Opt_init,	     "init"		  },
+	{ Opt_init,	     "init=%s"		  },
 	{ Opt_mode,	     "mode=%o"		  },
 	{ Opt_uid,	     "uid=%u"		  },
 	{ Opt_gid,	     "gid=%u"		  },
@@ -145,10 +175,35 @@ static const match_table_t tokens = {
 	{ Opt_err,	     NULL		  },
 };
 
+static phys_addr_t get_phys_addr(void **data)
+{
+	phys_addr_t phys_addr;
+	char *options = (char *)*data;
+
+	if (!options || strncmp(options, "physaddr=", 9) != 0)
+		return (phys_addr_t)ULLONG_MAX;
+	options += 9;
+	phys_addr = (phys_addr_t)simple_strtoull(options, &options, 0);
+	if (*options && *options != ',') {
+		printk(KERN_ERR "Invalid phys addr specification: %s\n",
+		       (char *)*data);
+		return (phys_addr_t)ULLONG_MAX;
+	}
+	if (phys_addr & (PAGE_SIZE - 1)) {
+		printk(KERN_ERR "physical address 0x%16llx for nova isn't "
+		       "aligned to a page boundary\n", (u64)phys_addr);
+		return (phys_addr_t)ULLONG_MAX;
+	}
+	if (*options == ',')
+		options++;
+	*data = (void *)options;
+	return phys_addr;
+}
+
 static int nova_parse_options(char *options, struct nova_sb_info *sbi,
 			       bool remount)
 {
-	char *p;
+	char *p, *rest;
 	substring_t args[MAX_OPT_ARGS];
 	int option;
 
@@ -162,6 +217,10 @@ static int nova_parse_options(char *options, struct nova_sb_info *sbi,
 
 		token = match_token(p, tokens, args);
 		switch (token) {
+		case Opt_addr:
+			if (remount)
+				goto bad_opt;
+			break;
 		case Opt_bpi:
 			if (remount)
 				goto bad_opt;
@@ -189,6 +248,9 @@ static int nova_parse_options(char *options, struct nova_sb_info *sbi,
 		case Opt_init:
 			if (remount)
 				goto bad_opt;
+			if (!isdigit(*args[0].from))
+				goto bad_val;
+			sbi->initsize = memparse(args[0].from, &rest);
 			set_opt(sbi->s_mount_opt, FORMAT);
 			break;
 		case Opt_err_panic:
@@ -270,6 +332,7 @@ static struct nova_inode *nova_init(struct super_block *sb,
 
 	NOVA_START_TIMING(new_init_t, init_time);
 	nova_info("creating an empty nova of size %lu\n", size);
+	sbi->virt_addr = nova_ioremap(sb, sbi->phys_addr, size);
 	sbi->block_start = (unsigned long)0;
 	sbi->block_end = ((unsigned long)(size) >> PAGE_SHIFT);
 
@@ -463,6 +526,7 @@ static int nova_fill_super(struct super_block *sb, void *data, int silent)
 	struct inode *root_i = NULL;
 	struct inode_map *inode_map;
 	unsigned long blocksize;
+	unsigned long initsize = 0;
 	u32 random = 0;
 	int retval = -EINVAL;
 	int i;
@@ -482,6 +546,10 @@ static int nova_fill_super(struct super_block *sb, void *data, int silent)
 
 	set_default_opts(sbi);
 
+	sbi->phys_addr = get_phys_addr(&data);
+	if (sbi->phys_addr == (phys_addr_t)ULLONG_MAX)
+		goto out;
+
 	/* Currently the log page supports 64 journal pointer pairs */
 	if (sbi->cpus > 64) {
 		nova_err(sb, "NOVA needs more log pointer pages "
@@ -489,8 +557,8 @@ static int nova_fill_super(struct super_block *sb, void *data, int silent)
 		goto out;
 	}
 
-	if (nova_get_block_info(sb, sbi))
-		goto out;
+//	if (nova_get_block_info(sb, sbi))
+//		goto out;
 
 	get_random_bytes(&random, sizeof(u32));
 	atomic_set(&sbi->next_generation, random);
@@ -530,6 +598,7 @@ static int nova_fill_super(struct super_block *sb, void *data, int silent)
 		goto out;
 
 	set_opt(sbi->s_mount_opt, MOUNTING);
+	initsize = sbi->initsize;
 
 	if (nova_alloc_block_free_lists(sb)) {
 		retval = -ENOMEM;
@@ -547,6 +616,32 @@ static int nova_fill_super(struct super_block *sb, void *data, int silent)
 
 	nova_dbg_verbose("checking physical address 0x%016llx for nova image\n",
 		  (u64)sbi->phys_addr);
+
+	/* Map only one page for now. Will remap it when fs size is known. */
+	initsize = PAGE_SIZE;
+	sbi->virt_addr = nova_ioremap(sb, sbi->phys_addr, initsize);
+	if (!sbi->virt_addr) {
+		printk(KERN_ERR "ioremap of the nova image failed(2)\n");
+		goto out;
+	}
+
+	super = nova_get_super(sb);
+
+	initsize = le64_to_cpu(super->s_size);
+	sbi->initsize = initsize;
+	nova_dbg_verbose("nova image appears to be %lu KB in size\n",
+		   initsize >> 10);
+
+	nova_iounmap(sbi->virt_addr, PAGE_SIZE, nova_is_wprotected(sb));
+
+	/* Remap the whole filesystem now */
+	release_mem_region(sbi->phys_addr, PAGE_SIZE);
+	/* FIXME: Remap the whole filesystem in nova virtual address range. */
+	sbi->virt_addr = nova_ioremap(sb, sbi->phys_addr, initsize);
+	if (!sbi->virt_addr) {
+		printk(KERN_ERR "ioremap of the nova image failed(3)\n");
+		goto out;
+	}
 
 	super = nova_get_super(sb);
 
@@ -622,6 +717,11 @@ setup_sb:
 	NOVA_END_TIMING(mount_t, mount_time);
 	return retval;
 out:
+	if (sbi->virt_addr) {
+		nova_iounmap(sbi->virt_addr, initsize, nova_is_wprotected(sb));
+		release_mem_region(sbi->phys_addr, initsize);
+	}
+
 	if (sbi->zeroed_page) {
 		kfree(sbi->zeroed_page);
 		sbi->zeroed_page = NULL;
@@ -748,6 +848,8 @@ static void nova_put_super(struct super_block *sb)
 {
 	struct nova_sb_info *sbi = NOVA_SB(sb);
 	struct inode_map *inode_map;
+	struct nova_super_block *ps = nova_get_super(sb);
+	u64 size = le64_to_cpu(ps->s_size);
 	int i;
 
 	/* It's unmount time, so unmap the nova memory */
@@ -756,6 +858,8 @@ static void nova_put_super(struct super_block *sb)
 		nova_save_inode_list_to_log(sb);
 		/* Save everything before blocknode mapping! */
 		nova_save_blocknode_mappings_to_log(sb);
+		nova_iounmap(sbi->virt_addr, size, nova_is_wprotected(sb));
+		release_mem_region(sbi->phys_addr, size);
 		sbi->virt_addr = NULL;
 	}
 
@@ -908,14 +1012,14 @@ static struct super_operations nova_sops = {
 static struct dentry *nova_mount(struct file_system_type *fs_type,
 				  int flags, const char *dev_name, void *data)
 {
-	return mount_bdev(fs_type, flags, dev_name, data, nova_fill_super);
+	return mount_nodev(fs_type, flags, data, nova_fill_super);
 }
 
 static struct file_system_type nova_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "NOVA",
 	.mount		= nova_mount,
-	.kill_sb	= kill_block_super,
+	.kill_sb	= kill_anon_super,
 };
 
 static struct inode *nova_nfs_get_inode(struct super_block *sb,
