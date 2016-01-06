@@ -1,0 +1,34 @@
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index 72d8a84..2032e42 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -1622,6 +1622,7 @@ struct file_operations {
+ 	long (*unlocked_ioctl) (struct file *, unsigned int, unsigned long);
+ 	long (*compat_ioctl) (struct file *, unsigned int, unsigned long);
+ 	int (*mmap) (struct file *, struct vm_area_struct *);
++	int (*munmap) (struct file *, struct vm_area_struct *, loff_t, loff_t);
+ 	int (*open) (struct inode *, struct file *);
+ 	int (*flush) (struct file *, fl_owner_t id);
+ 	int (*release) (struct inode *, struct file *);
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 79bcc9f..afa427f 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -2535,6 +2535,7 @@ int do_munmap(struct mm_struct *mm, unsigned long start, size_t len)
+ {
+ 	unsigned long end;
+ 	struct vm_area_struct *vma, *prev, *last;
++	int ret;
+ 
+ 	if ((start & ~PAGE_MASK) || start > TASK_SIZE || len > TASK_SIZE-start)
+ 		return -EINVAL;
+@@ -2606,6 +2607,9 @@ int do_munmap(struct mm_struct *mm, unsigned long start, size_t len)
+ 	 * Remove the vma's, and unmap the actual pages
+ 	 */
+ 	detach_vmas_to_be_unmapped(mm, vma, prev, end);
++	if (vma->vm_file && vma->vm_file->f_op->munmap)
++		ret = vma->vm_file->f_op->munmap(vma->vm_file,
++						 vma, start, end);
+ 	unmap_region(mm, vma, prev, start, end);
+ 
+ 	arch_unmap(mm, vma, start, end);

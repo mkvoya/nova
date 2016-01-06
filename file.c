@@ -368,6 +368,24 @@ static int nova_open(struct inode *inode, struct file *filp)
 	return generic_file_open(inode, filp);
 }
 
+static int nova_munmap(struct file *file, struct vm_area_struct *vma,
+	loff_t start, loff_t end)
+{
+	struct address_space *mapping = file->f_mapping;
+	unsigned long pgoff = vma->vm_pgoff;
+	size_t size = end - (start & (PAGE_SIZE - 1));
+
+	 /* Issue a msync() on munmap */
+	nova_dbg("%s\n", __func__);
+	if (mapping_mapped(mapping)) {
+		start = pgoff << PAGE_SHIFT;
+		end = start + size;
+		nova_fsync(file, start, end, 0);
+	}
+
+	return 0;
+}
+
 #if 0
 static unsigned long
 nova_get_unmapped_area(struct file *file, unsigned long addr,
@@ -429,6 +447,7 @@ const struct file_operations nova_dax_file_operations = {
 	.read_iter		= generic_file_read_iter,
 	.write_iter		= generic_file_write_iter,
 	.mmap			= nova_dax_file_mmap,
+	.munmap			= nova_munmap,
 	.open			= nova_open,
 	.fsync			= nova_fsync,
 	.flush			= nova_flush,

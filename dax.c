@@ -788,8 +788,9 @@ static int __nova_dax_file_fault(struct vm_area_struct *vma,
 			__func__, vma->vm_flags, vmf->flags);
 
 	nova_dbgv("DAX mmap: inode %lu, vm_start(0x%lx), vm_end(0x%lx), "
-			"pgoff(0x%lx), BlockSz(%lu), VA(0x%lx)->PA(0x%lx)\n",
-			inode->i_ino, vma->vm_start, vma->vm_end, vmf->pgoff,
+			"vmf pgoff(0x%lx), vma pgoff 0x%lx, BlockSz(%lu), "
+			"VA(0x%lx)->PA(0x%lx)\n", inode->i_ino, vma->vm_start,
+			vma->vm_end, vmf->pgoff, vma->vm_pgoff,
 			PAGE_SIZE, (unsigned long)vmf->virtual_address,
 			(unsigned long)dax_pfn << PAGE_SHIFT);
 
